@@ -1,43 +1,88 @@
 import boto3
-from datetime import datetime
-from clousec.utils.db import findings_collection
+from botocore.exceptions import ClientError
+from clousec.models import upsert_finding, resolve_finding
 
 s3 = boto3.client("s3")
 
 
-def is_bucket_public(bucket_name):
-    """Check if S3 bucket is public"""
+def scan_bucket(bucket_name):
+    region = "global"
 
+    # -------------------------
+    # 1️⃣ Public Policy
+    # -------------------------
     try:
         status = s3.get_bucket_policy_status(Bucket=bucket_name)
-        return status["PolicyStatus"]["IsPublic"]
-    except Exception:
-        return False
+        is_public = status["PolicyStatus"]["IsPublic"]
+    except ClientError:
+        is_public = False
 
+    if is_public:
+        upsert_finding(
+            "S3", bucket_name,
+            "Public bucket policy",
+            "HIGH", region
+        )
+    else:
+        resolve_finding(
+            "S3", bucket_name,
+            "Public bucket policy",
+            region
+        )
 
-def scan_s3_buckets():
-    """Scan all buckets and store findings"""
+    # -------------------------
+    # 2️⃣ Public ACL
+    # -------------------------
+    try:
+        acl = s3.get_bucket_acl(Bucket=bucket_name)
+        public_acl = any(
+            grant.get("Grantee", {}).get("URI", "").endswith("AllUsers")
+            for grant in acl.get("Grants", [])
+        )
+    except ClientError:
+        public_acl = False
 
-    print("🔍 Scanning S3 buckets...")
+    if public_acl:
+        upsert_finding(
+            "S3", bucket_name,
+            "Public ACL enabled",
+            "HIGH", region
+        )
+    else:
+        resolve_finding(
+            "S3", bucket_name,
+            "Public ACL enabled",
+            region
+        )
 
-    buckets = s3.list_buckets()["Buckets"]
+    # -------------------------
+    # 3️⃣ Block Public Access Disabled
+    # -------------------------
+    try:
+        block = s3.get_public_access_block(Bucket=bucket_name)
+        config = block["PublicAccessBlockConfiguration"]
+        if not all(config.values()):
+            upsert_finding(
+                "S3", bucket_name,
+                "Block Public Access disabled",
+                "HIGH", region
+            )
+    except ClientError:
+        pass
 
-    for bucket in buckets:
-        bucket_name = bucket["Name"]
-
-        is_public = is_bucket_public(bucket_name)
-
-        if is_public:
-            finding = {
-                "service": "S3",
-                "resource_id": bucket_name,
-                "severity": "HIGH",
-                "issue": "Public S3 bucket detected",
-                "region": "global",
-                "timestamp": datetime.utcnow()
-            }
-
-            findings_collection.insert_one(finding)
-            print(f"🚨 Public bucket found: {bucket_name}")
-
-    print("✅ S3 scan complete")
+    # -------------------------
+    # 4️⃣ Encryption Disabled
+    # -------------------------
+    try:
+        s3.get_bucket_encryption(Bucket=bucket_name)
+        resolve_finding(
+            "S3", bucket_name,
+            "S3 bucket not encrypted",
+            region
+        )
+    except ClientError:
+        upsert_finding(
+            "S3", bucket_name,
+            "S3 bucket not encrypted",
+            "MEDIUM", region
+        )

@@ -15,55 +15,106 @@ def is_world_open(permission):
     return False
 
 
-def scan_security_groups():
-    print("🔍 Scanning EC2 security groups across regions...")
+from clousec.models import upsert_finding, resolve_finding
 
-    regions = get_all_regions()
+def scan_security_group(region, sg_id):
+    print(f"🔍 Scanning EC2 security group {sg_id} in region {region}")
 
-    for region in regions:
-        print(f"🌍 Checking region: {region}")
+    ec2 = boto3.client("ec2", region_name=region)
 
-        ec2 = boto3.client("ec2", region_name=region)
+    response = ec2.describe_security_groups(GroupIds=[sg_id])
 
-        response = ec2.describe_security_groups()
+    sg = response["SecurityGroups"][0]
 
-        for sg in response["SecurityGroups"]:
-            sg_id = sg["GroupId"]
+    world_open_detected = False
 
-            for perm in sg.get("IpPermissions", []):
-                from_port = perm.get("FromPort")
-                to_port = perm.get("ToPort")
+    for perm in sg.get("IpPermissions", []):
 
-                if is_world_open(perm):
+        if is_world_open(perm):
+            world_open_detected = True
 
-                    severity = "MEDIUM"
+            severity = "MEDIUM"
 
-                    if from_port in SENSITIVE_PORTS:
-                        severity = "HIGH"
+            from_port = perm.get("FromPort")
+            to_port = perm.get("ToPort")
 
-                    if from_port == 0 and to_port == 65535:
-                        severity = "CRITICAL"
+            if from_port in SENSITIVE_PORTS:
+                severity = "HIGH"
 
-                    finding = {
-                        "service": "EC2",
-                        "resource_id": sg_id,
-                        "severity": severity,
-                        "issue": "Security group open to world",
-                        "region": region,
-                        "timestamp": datetime.utcnow(),
-                    }
+            if from_port == 0 and to_port == 65535:
+                severity = "CRITICAL"
 
-                    findings_collection.update_one(
-                        {
-                            "service": "EC2",
-                            "resource_id": sg_id,
-                            "issue": "Security group open to world",
-                            "region": region,
-                        },
-                        {"$set": finding},
-                        upsert=True,
+            upsert_finding(
+                service="EC2",
+                resource_id=sg_id,
+                issue="Security group open to world",
+                severity=severity,
+                region=region
+            )
+
+    # If no world open rule → resolve finding
+    if not world_open_detected:
+        resolve_finding(
+            service="EC2",
+            resource_id=sg_id,
+            issue="Security group open to world",
+            region=region
+        )
+
+    print("✅ Security group scan complete")
+
+
+def scan_instance(region, instance_id):
+    ec2 = boto3.client("ec2", region_name=region)
+
+    response = ec2.describe_instances(InstanceIds=[instance_id])
+
+    for reservation in response["Reservations"]:
+        for instance in reservation["Instances"]:
+
+            # 1️⃣ Public IP
+            if instance.get("PublicIpAddress"):
+                upsert_finding(
+                    "EC2", instance_id,
+                    "Instance has public IP",
+                    "HIGH", region
+                )
+            else:
+                resolve_finding(
+                    "EC2", instance_id,
+                    "Instance has public IP",
+                    region
+                )
+
+            # 2️⃣ IMDSv1 Enabled
+            metadata = instance.get("MetadataOptions", {})
+            if metadata.get("HttpTokens") == "optional":
+                upsert_finding(
+                    "EC2", instance_id,
+                    "IMDSv1 enabled",
+                    "MEDIUM", region
+                )
+            else:
+                resolve_finding(
+                    "EC2", instance_id,
+                    "IMDSv1 enabled",
+                    region
+                )
+
+            # 3️⃣ Unencrypted EBS
+            for block in instance.get("BlockDeviceMappings", []):
+                volume_id = block["Ebs"]["VolumeId"]
+                volume = ec2.describe_volumes(VolumeIds=[volume_id])["Volumes"][0]
+
+                if not volume.get("Encrypted"):
+                    upsert_finding(
+                        "EC2", instance_id,
+                        "Unencrypted EBS volume",
+                        "HIGH", region
                     )
-
-                    print(f"🚨 Open security group found: {sg_id} ({region})")
-
-    print("✅ EC2 multi-region scan complete")
+                else:
+                    resolve_finding(
+                        "EC2", instance_id,
+                        "Unencrypted EBS volume",
+                        region
+                    )
