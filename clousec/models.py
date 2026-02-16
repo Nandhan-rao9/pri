@@ -30,14 +30,19 @@ def upsert_finding(service, resource_id, issue, severity, region):
 
 
 def resolve_finding(service, resource_id, issue, region):
-    finding_id = generate_finding_id(service, resource_id, issue, region)
-
     findings_collection.update_one(
-        {"finding_id": finding_id, "status": "OPEN"},
+        {
+            "service": service,
+            "resource_id": resource_id,
+            "issue": issue,
+            "region": region,
+            "status": "OPEN"
+        },
         {
             "$set": {
                 "status": "RESOLVED",
                 "resolved_at": datetime.utcnow(),
+                "last_seen": datetime.utcnow()
             }
-        },
+        }
     )

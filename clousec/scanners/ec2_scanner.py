@@ -1,7 +1,6 @@
 import boto3
 from datetime import datetime
 from clousec.utils.db import findings_collection
-
 from clousec.utils.aws_regions import get_all_regions
 
 SENSITIVE_PORTS = {22, 3389}

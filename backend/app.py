@@ -4,9 +4,12 @@ from clousec.scanners.s3_scanner import scan_bucket
 from clousec.scanners.iam_scanner import scan_role
 from clousec.utils.db import findings_collection
 from clousec.services.inventory_service import get_inventory
+from flask_cors import CORS
 
 
 app = Flask(__name__)
+
+CORS(app, origins=["http://localhost:5173"])
 
 
 @app.route("/health")
@@ -104,47 +107,48 @@ def handle_event():
 
 @app.route("/dashboard")
 def dashboard():
-    pipeline = [
+
+    # Count OPEN findings
+    open_count = findings_collection.count_documents({"status": "OPEN"})
+
+    # Count RESOLVED findings
+    resolved_count = findings_collection.count_documents({"status": "RESOLVED"})
+
+    # -----------------------------
+    # Group by severity (OPEN only)
+    # -----------------------------
+    severity_pipeline = [
+        {"$match": {"status": "OPEN"}},
         {
             "$group": {
-                "_id": {
-                    "status": "$status",
-                    "severity": "$severity",
-                    "service": "$service",
-                },
-                "count": {"$sum": 1},
+                "_id": "$severity",
+                "count": {"$sum": 1}
             }
         }
     ]
 
-    result = list(findings_collection.aggregate(pipeline))
+    severity_result = findings_collection.aggregate(severity_pipeline)
+    by_severity = {r["_id"]: r["count"] for r in severity_result}
 
-    summary = {
-        "open": 0,
-        "resolved": 0,
-        "by_severity": {},
-        "by_service": {},
-    }
+    # -----------------------------
+    # Group by service (OPEN only)
+    # -----------------------------
+    service_pipeline = [
+        {"$match": {"status": "OPEN"}},
+        {
+            "$group": {
+                "_id": "$service",
+                "count": {"$sum": 1}
+            }
+        }
+    ]
 
-    for r in result:
-        status = r["_id"]["status"]
-        severity = r["_id"]["severity"]
-        service = r["_id"]["service"]
-        count = r["count"]
+    service_result = findings_collection.aggregate(service_pipeline)
+    by_service = {r["_id"]: r["count"] for r in service_result}
 
-        if status == "OPEN":
-            summary["open"] += count
-        else:
-            summary["resolved"] += count
-
-        summary["by_severity"][severity] = (
-            summary["by_severity"].get(severity, 0) + count
-        )
-        summary["by_service"][service] = (
-            summary["by_service"].get(service, 0) + count
-        )
-
-    # 🔥 Add top open findings
+    # -----------------------------
+    # Open findings list
+    # -----------------------------
     open_findings = list(
         findings_collection.find(
             {"status": "OPEN"},
@@ -159,7 +163,13 @@ def dashboard():
         ).limit(10)
     )
 
-    summary["open_findings"] = open_findings
+    summary = {
+        "open": open_count,
+        "resolved": resolved_count,
+        "by_severity": by_severity,
+        "by_service": by_service,
+        "open_findings": open_findings,
+    }
 
     return jsonify(summary)
 
