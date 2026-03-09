@@ -1,4 +1,4 @@
-# The project onitors AWS services continuously and highlights security risks through a modern visual dashboard.
+# The project monitors AWS services continuously and highlights security risks through a modern visual dashboard.
 
 ---
 
@@ -303,3 +303,4 @@ Total Risk = Σ(severity_weight × count)
 
 
 Tell me what you want next.
+
